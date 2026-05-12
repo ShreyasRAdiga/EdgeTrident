@@ -100,4 +100,15 @@ class LiteVisionContractsTest {
 
         assertTrue(error.message.orEmpty().contains("not divisible"))
     }
+
+    @Test
+    fun yoloAndTrackNetSpecsPointToExpectedAssets() {
+        val yolo = NcnnModelSpec.yoloV7()
+        val trackNet = NcnnModelSpec.trackNet()
+
+        assertEquals("models/litevision/yolov7.param", yolo.paramAssetPath)
+        assertEquals("models/litevision/yolov7.bin", yolo.binAssetPath)
+        assertEquals("models/litevision/tracknet.param", trackNet.paramAssetPath)
+        assertEquals("models/litevision/tracknet.bin", trackNet.binAssetPath)
+    }
 }

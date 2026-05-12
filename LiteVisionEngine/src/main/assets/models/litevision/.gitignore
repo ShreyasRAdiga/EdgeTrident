@@ -1,6 +1,6 @@
 *.bin
 *.param
+*.task
 !*.placeholder
 !README.md
 !.gitignore
-

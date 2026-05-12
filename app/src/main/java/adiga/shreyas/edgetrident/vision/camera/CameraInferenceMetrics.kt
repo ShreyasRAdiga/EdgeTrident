@@ -9,13 +9,14 @@ data class CameraInferenceMetrics(
     val inferenceMs: Double,
     val totalMs: Double,
     val fps: Double,
-    val trackCount: Int,
     val modelReady: Boolean,
     val inferenceRan: Boolean,
     val requestedVulkan: Boolean,
     val nativeCapabilities: String,
     val modelStatus: String,
     val copyPath: String,
+    val yoloLane: InferenceLaneMetrics,
+    val poseLane: InferenceLaneMetrics,
     val lastError: String? = null,
 ) {
     companion object {
@@ -28,13 +29,38 @@ data class CameraInferenceMetrics(
             inferenceMs = 0.0,
             totalMs = 0.0,
             fps = 0.0,
-            trackCount = 0,
             modelReady = false,
             inferenceRan = false,
             requestedVulkan = requestedVulkan,
             nativeCapabilities = "native engine not opened yet",
             modelStatus = "waiting for camera permission",
-            copyPath = "CameraX YUV_420_888 -> direct ByteBuffer",
+            copyPath = "CameraX RGBA_8888 -> packed direct ByteBuffer",
+            yoloLane = InferenceLaneMetrics(
+                lane = "YOLOv7",
+                ready = false,
+                ran = false,
+                durationMs = 0.0,
+                resultCount = 0,
+                status = "waiting for camera",
+            ),
+            poseLane = InferenceLaneMetrics(
+                lane = "MediaPipe Pose",
+                ready = false,
+                ran = false,
+                durationMs = 0.0,
+                resultCount = 0,
+                status = "waiting for camera",
+            ),
         )
     }
 }
+
+data class InferenceLaneMetrics(
+    val lane: String,
+    val ready: Boolean,
+    val ran: Boolean,
+    val durationMs: Double,
+    val resultCount: Int,
+    val status: String,
+    val error: String? = null,
+)

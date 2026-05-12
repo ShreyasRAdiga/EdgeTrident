@@ -6,6 +6,13 @@ The module can prepare the official Android NCNN Vulkan package automatically:
 .\gradlew.bat :LiteVisionEngine:prepareLiteVisionNcnn --console=plain
 ```
 
+Model assets used by the camera probe are prepared automatically as part of
+`preBuild`, or on demand:
+
+```powershell
+.\gradlew.bat :LiteVisionEngine:prepareLiteVisionModels --console=plain
+```
+
 By default, native CMake tasks also depend on that preparation step, so
 `:app:assembleDebug` downloads and extracts NCNN once if it is missing. To keep
 the fallback/no-download build, pass:

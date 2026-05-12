@@ -9,6 +9,9 @@ import adiga.shreyas.edgetrident.litevisionengine.LiteVisionEngine
 import adiga.shreyas.edgetrident.litevisionengine.NcnnModelSpec
 import adiga.shreyas.edgetrident.litevisionengine.VisionFrame
 import java.nio.ByteBuffer
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.max
 
 class CameraInferenceAnalyzer(
@@ -21,39 +24,30 @@ class CameraInferenceAnalyzer(
         private const val LOG_TAG = "EdgeTridentInference"
     }
 
-    private val engine: LiteVisionEngine?
-    private val nativeCapabilities: String
-    private var modelReady = false
-    private var modelStatus: String
+    private data class NcnnLane(
+        val lane: String,
+        val modelId: String,
+        val engine: LiteVisionEngine?,
+        val ready: Boolean,
+        val status: String,
+    )
+
+    private val appContext = context.applicationContext
+    private val laneExecutor: ExecutorService = Executors.newFixedThreadPool(2)
+    private val initLock = Any()
+
+    @Volatile
+    private var initialized = false
+    private var nativeCapabilities = "native engine not opened yet"
+    private var modelStatus = "initializing"
+
+    private var yoloLane: NcnnLane? = null
+    private var poseLane: MediaPipePoseEstimator? = null
+
     private var frameBuffer = ByteBuffer.allocateDirect(0)
     private var frameCount = 0L
     private var lastFrameEndNanos = 0L
     private var closed = false
-
-    init {
-        val engineResult = runCatching {
-            LiteVisionEngine(
-                context = context.applicationContext,
-                config = LiteVisionConfig(preferVulkan = requestedVulkan),
-            )
-        }
-        engine = engineResult.getOrNull()
-
-        nativeCapabilities = engine?.let { openedEngine ->
-            runCatching { openedEngine.capabilities }
-                .getOrElse { error -> "capability query failed: ${error.message.orEmpty()}" }
-        } ?: "native engine unavailable: ${engineResult.exceptionOrNull()?.message.orEmpty()}"
-
-        modelStatus = engine?.let { openedEngine ->
-            runCatching {
-                openedEngine.loadModel(NcnnModelSpec.objectTracker(preferVulkan = requestedVulkan))
-                modelReady = true
-                "model loaded"
-            }.getOrElse { error ->
-                "model not loaded: ${error.message.orEmpty()}"
-            }
-        } ?: "model not loaded: native engine unavailable"
-    }
 
     override fun analyze(image: ImageProxy) {
         if (closed) {
@@ -62,38 +56,43 @@ class CameraInferenceAnalyzer(
         }
 
         val frameStartNanos = System.nanoTime()
-        var trackCount = 0
-        var inferenceRan = false
         var lastError: String? = null
         var copyMs = 0.0
         var inferenceMs = 0.0
+        var yoloMetrics = InferenceLaneMetrics("YOLOv7", false, false, 0.0, 0, "not initialized")
+        var poseMetrics = InferenceLaneMetrics("MediaPipe Pose", false, false, 0.0, 0, "not initialized")
 
         try {
+            ensureInitialized()
+
             val copyStartNanos = System.nanoTime()
-            val directBuffer = copyYuv420ToDirectBuffer(image)
+            val directBuffer = copyRgba8888ToDirectBuffer(image)
             copyMs = elapsedMs(copyStartNanos, System.nanoTime())
 
-            val inferenceStartNanos = System.nanoTime()
             val frame = VisionFrame(
                 buffer = directBuffer,
                 width = image.width,
                 height = image.height,
-                pixelFormat = VisionFrame.PixelFormat.YUV_420_888,
-                rowStrideBytes = image.planes.first().rowStride,
+                pixelFormat = VisionFrame.PixelFormat.RGBA_8888,
+                rowStrideBytes = image.width * 4,
                 timestampNanos = image.imageInfo.timestamp,
                 rotationDegrees = image.imageInfo.rotationDegrees,
             )
 
-            if (modelReady && engine != null) {
-                trackCount = engine.track(frame).size
-                inferenceRan = true
-            }
+            val inferenceStartNanos = System.nanoTime()
+            val yoloFuture = laneExecutor.submit<InferenceLaneMetrics> { runNcnnLane(yoloLane, frame) }
+            val poseFuture = laneExecutor.submit<InferenceLaneMetrics> { runPoseLane(poseLane, frame) }
+
+            yoloMetrics = yoloFuture.get()
+            poseMetrics = poseFuture.get()
             inferenceMs = elapsedMs(inferenceStartNanos, System.nanoTime())
         } catch (throwable: Throwable) {
             lastError = throwable.message ?: throwable::class.java.simpleName
         } finally {
             val frameEndNanos = System.nanoTime()
             frameCount += 1
+            val inferenceRan = yoloMetrics.ran || poseMetrics.ran
+            val modelReady = yoloMetrics.ready || poseMetrics.ready
             val metrics = CameraInferenceMetrics(
                 frameCount = frameCount,
                 width = image.width,
@@ -103,13 +102,14 @@ class CameraInferenceAnalyzer(
                 inferenceMs = inferenceMs,
                 totalMs = elapsedMs(frameStartNanos, frameEndNanos),
                 fps = fps(frameEndNanos),
-                trackCount = trackCount,
                 modelReady = modelReady,
                 inferenceRan = inferenceRan,
                 requestedVulkan = requestedVulkan,
                 nativeCapabilities = nativeCapabilities,
                 modelStatus = modelStatus,
-                copyPath = "CameraX ImageProxy planes -> pooled direct ByteBuffer -> JNI",
+                copyPath = "CameraX RGBA_8888 -> packed direct ByteBuffer -> JNI",
+                yoloLane = yoloMetrics,
+                poseLane = poseMetrics,
                 lastError = lastError,
             )
             onMetrics(metrics)
@@ -121,23 +121,162 @@ class CameraInferenceAnalyzer(
 
     override fun close() {
         closed = true
-        engine?.close()
+        yoloLane?.engine?.close()
+        poseLane?.close()
+        laneExecutor.shutdown()
     }
 
-    private fun copyYuv420ToDirectBuffer(image: ImageProxy): ByteBuffer {
-        val planeBytes = image.planes.sumOf { plane -> plane.buffer.remaining() }
-        val yStrideBytes = image.planes.first().rowStride
-        val minimumFrameBytes = yStrideBytes * ((image.height * 3 + 1) / 2)
-        val requiredBytes = max(planeBytes, minimumFrameBytes)
+    private fun ensureInitialized() {
+        if (initialized) {
+            return
+        }
+        synchronized(initLock) {
+            if (initialized) {
+                return
+            }
+
+            val yoloSpec = NcnnModelSpec.yoloV7(preferVulkan = requestedVulkan)
+            yoloLane = createNcnnLane("YOLOv7", yoloSpec)
+            poseLane = MediaPipePoseEstimator(appContext)
+
+            nativeCapabilities = yoloLane?.engine?.let { engine ->
+                runCatching { engine.capabilities }.getOrElse { "capability query failed: ${it.message.orEmpty()}" }
+            } ?: "native engine unavailable"
+
+            modelStatus = buildString {
+                append("yolo=${yoloLane?.status.orEmpty()}; ")
+                append("pose=${poseLane?.status.orEmpty()}")
+            }
+
+            initialized = true
+        }
+    }
+
+    private fun createNcnnLane(
+        lane: String,
+        spec: NcnnModelSpec,
+    ): NcnnLane {
+        val result = runCatching {
+            val engine = LiteVisionEngine(
+                context = appContext,
+                config = LiteVisionConfig(preferVulkan = requestedVulkan),
+            )
+            engine.loadModel(spec)
+            engine
+        }
+        val engine = result.getOrNull()
+        return if (engine != null) {
+            NcnnLane(
+                lane = lane,
+                modelId = spec.id,
+                engine = engine,
+                ready = true,
+                status = "model loaded",
+            )
+        } else {
+            NcnnLane(
+                lane = lane,
+                modelId = spec.id,
+                engine = null,
+                ready = false,
+                status = "model not loaded: ${result.exceptionOrNull()?.message.orEmpty()}",
+            )
+        }
+    }
+
+    private fun runNcnnLane(
+        lane: NcnnLane?,
+        frame: VisionFrame,
+    ): InferenceLaneMetrics {
+        if (lane == null) {
+            return InferenceLaneMetrics("unknown", false, false, 0.0, 0, "lane not initialized")
+        }
+        if (!lane.ready || lane.engine == null) {
+            return InferenceLaneMetrics(lane.lane, false, false, 0.0, 0, lane.status)
+        }
+
+        val start = System.nanoTime()
+        return runCatching {
+            val results = lane.engine.track(frame, lane.modelId)
+            InferenceLaneMetrics(
+                lane = lane.lane,
+                ready = true,
+                ran = true,
+                durationMs = elapsedMs(start, System.nanoTime()),
+                resultCount = results.size,
+                status = lane.status,
+            )
+        }.getOrElse { error ->
+            InferenceLaneMetrics(
+                lane = lane.lane,
+                ready = true,
+                ran = false,
+                durationMs = elapsedMs(start, System.nanoTime()),
+                resultCount = 0,
+                status = lane.status,
+                error = error.message ?: error::class.java.simpleName,
+            )
+        }
+    }
+
+    private fun runPoseLane(
+        poseEstimator: MediaPipePoseEstimator?,
+        frame: VisionFrame,
+    ): InferenceLaneMetrics {
+        if (poseEstimator == null) {
+            return InferenceLaneMetrics("MediaPipe Pose", false, false, 0.0, 0, "lane not initialized")
+        }
+        if (!poseEstimator.ready) {
+            return InferenceLaneMetrics("MediaPipe Pose", false, false, 0.0, 0, poseEstimator.status)
+        }
+
+        val start = System.nanoTime()
+        return runCatching {
+            val poseCount = poseEstimator.estimatePoseCount(frame)
+            InferenceLaneMetrics(
+                lane = "MediaPipe Pose",
+                ready = true,
+                ran = true,
+                durationMs = elapsedMs(start, System.nanoTime()),
+                resultCount = poseCount,
+                status = poseEstimator.status,
+            )
+        }.getOrElse { error ->
+            InferenceLaneMetrics(
+                lane = "MediaPipe Pose",
+                ready = true,
+                ran = false,
+                durationMs = elapsedMs(start, System.nanoTime()),
+                resultCount = 0,
+                status = poseEstimator.status,
+                error = error.message ?: error::class.java.simpleName,
+            )
+        }
+    }
+
+    private fun copyRgba8888ToDirectBuffer(image: ImageProxy): ByteBuffer {
+        val plane = image.planes.first()
+        val rowStride = plane.rowStride
+        val contiguousRowBytes = image.width * 4
+        val requiredBytes = contiguousRowBytes * image.height
 
         if (frameBuffer.capacity() < requiredBytes) {
             frameBuffer = ByteBuffer.allocateDirect(requiredBytes)
         }
 
         frameBuffer.clear()
-        image.planes.forEach { plane ->
-            val source = plane.buffer.duplicate()
+        val source = plane.buffer.duplicate()
+        source.position(0)
+        if (rowStride == contiguousRowBytes) {
+            source.limit(requiredBytes)
             frameBuffer.put(source)
+        } else {
+            repeat(image.height) { row ->
+                val rowStart = row * rowStride
+                source.limit(rowStart + contiguousRowBytes)
+                source.position(rowStart)
+                frameBuffer.put(source)
+            }
         }
         frameBuffer.flip()
         return frameBuffer
@@ -148,7 +287,7 @@ class CameraInferenceAnalyzer(
         if (previous == 0L) {
             return 0.0
         }
-        return 1_000_000_000.0 / (frameEndNanos - previous).coerceAtLeast(1L)
+        return 1_000_000_000.0 / max(1L, frameEndNanos - previous)
     }
 
     private fun elapsedMs(startNanos: Long, endNanos: Long): Double =
@@ -161,13 +300,13 @@ class CameraInferenceAnalyzer(
 
         Log.i(
             LOG_TAG,
-            "frame=${metrics.frameCount} size=${metrics.width}x${metrics.height} " +
-                "copyMs=${"%.2f".format(metrics.copyMs)} " +
-                "inferenceMs=${"%.2f".format(metrics.inferenceMs)} " +
-                "totalMs=${"%.2f".format(metrics.totalMs)} fps=${"%.2f".format(metrics.fps)} " +
-                "inferenceRan=${metrics.inferenceRan} tracks=${metrics.trackCount} " +
-                "native='${metrics.nativeCapabilities}' model='${metrics.modelStatus}' " +
-                "error='${metrics.lastError.orEmpty()}'",
+            "frame=${metrics.frameCount} copyMs=${format(metrics.copyMs)} " +
+                "inferMs=${format(metrics.inferenceMs)} fps=${format(metrics.fps)} " +
+                "yolo=${format(metrics.yoloLane.durationMs)}ms/${metrics.yoloLane.ran} " +
+                "pose=${format(metrics.poseLane.durationMs)}ms/${metrics.poseLane.ran} " +
+                "native='${metrics.nativeCapabilities}' lastError='${metrics.lastError.orEmpty()}'",
         )
     }
+
+    private fun format(value: Double): String = String.format(Locale.US, "%.2f", value)
 }

@@ -13,6 +13,7 @@
 #endif
 
 #include <atomic>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -155,6 +156,75 @@ void configure_net_options(NativeEngine* engine, ncnn::Net* net, bool prefer_vul
         );
     }
 #endif
+}
+
+int ncnn_pixel_type_from_frame_format(jint pixel_format) {
+    switch (pixel_format) {
+        case 1:
+            return ncnn::Mat::PIXEL_RGBA2RGB;
+        case 2:
+            return ncnn::Mat::PIXEL_RGB;
+        default:
+            return -1;
+    }
+}
+
+ncnn::Mat create_inference_input(
+    const LoadedModel& model,
+    const void* frame_data,
+    jint frame_width,
+    jint frame_height,
+    jint pixel_format
+) {
+    const int pixel_type = ncnn_pixel_type_from_frame_format(pixel_format);
+    if (pixel_type < 0) {
+        return {};
+    }
+
+    return ncnn::Mat::from_pixels_resize(
+        static_cast<const unsigned char*>(frame_data),
+        pixel_type,
+        static_cast<int>(frame_width),
+        static_cast<int>(frame_height),
+        model.input_width,
+        model.input_height
+    );
+}
+
+void append_if_missing(std::vector<std::string>& values, const std::string& candidate) {
+    if (candidate.empty()) {
+        return;
+    }
+
+    if (std::find(values.begin(), values.end(), candidate) == values.end()) {
+        values.push_back(candidate);
+    }
+}
+
+std::vector<std::string> input_candidates(const LoadedModel& model) {
+    std::vector<std::string> candidates;
+    append_if_missing(candidates, model.input_name);
+    append_if_missing(candidates, "images");
+    append_if_missing(candidates, "in0");
+    append_if_missing(candidates, "input");
+    append_if_missing(candidates, "data");
+    return candidates;
+}
+
+std::vector<std::string> output_candidates(const LoadedModel& model) {
+    if (!model.output_names.empty()) {
+        return model.output_names;
+    }
+
+    std::vector<std::string> candidates;
+    append_if_missing(candidates, "out0");
+    append_if_missing(candidates, "out1");
+    append_if_missing(candidates, "out2");
+    append_if_missing(candidates, "output0");
+    append_if_missing(candidates, "output1");
+    append_if_missing(candidates, "output2");
+    append_if_missing(candidates, "output");
+    return candidates;
 }
 #endif
 
@@ -320,7 +390,6 @@ Java_adiga_shreyas_edgetrident_litevisionengine_NativeBridge_nativeTrack(
     jlong timestamp_nanos,
     jint rotation_degrees
 ) {
-    (void)width;
     (void)timestamp_nanos;
     (void)rotation_degrees;
 
@@ -351,11 +420,56 @@ Java_adiga_shreyas_edgetrident_litevisionengine_NativeBridge_nativeTrack(
         return nullptr;
     }
 
-    ncnn::Extractor extractor = model->second.net->create_extractor();
-    extractor.set_light_mode(true);
+    const LoadedModel& loaded_model = model->second;
+    ncnn::Mat input_tensor = create_inference_input(
+        loaded_model,
+        frame_data,
+        width,
+        height,
+        pixel_format
+    );
+    if (input_tensor.empty()) {
+        throw_java(
+            env,
+            "java/lang/IllegalArgumentException",
+            "Unsupported frame format for NCNN inference. Use RGBA_8888 or RGB_888."
+        );
+        return nullptr;
+    }
 
-    // Tracking output parsing is model-specific. The foundation validates the
-    // zero-copy handoff and creates a fresh NCNN extractor per frame.
+    const std::vector<std::string> all_input_candidates = input_candidates(loaded_model);
+    const std::vector<std::string> all_output_candidates = output_candidates(loaded_model);
+    bool inference_executed = false;
+
+    for (const std::string& input_name : all_input_candidates) {
+        ncnn::Extractor extractor = loaded_model.net->create_extractor();
+        extractor.set_light_mode(true);
+        const int input_status = extractor.input(input_name.c_str(), input_tensor);
+        if (input_status != 0) {
+            continue;
+        }
+
+        for (const std::string& output_name : all_output_candidates) {
+            ncnn::Mat output;
+            const int extract_status = extractor.extract(output_name.c_str(), output);
+            if (extract_status == 0) {
+                inference_executed = true;
+            }
+        }
+        if (inference_executed) {
+            break;
+        }
+    }
+
+    if (!inference_executed) {
+        throw_java(
+            env,
+            "java/lang/IllegalStateException",
+            "NCNN forward pass failed. Check model input/output blob names."
+        );
+        return nullptr;
+    }
+
     return empty_results(env);
 #else
     (void)model_id;

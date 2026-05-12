@@ -1,15 +1,22 @@
 # LiteVision Model Assets
 
-Place NCNN model files for the LiteVision tracker in this folder.
+This folder stores runtime model assets consumed by camera inference probes.
 
-The default Kotlin spec expects:
+By default, `:LiteVisionEngine:prepareLiteVisionModels` downloads:
 
 ```text
-models/litevision/object_tracker.param
-models/litevision/object_tracker.bin
+models/litevision/yolov7.param
+models/litevision/yolov7.bin
+models/litevision/pose_landmarker_lite.task
 ```
 
-The checked-in `.placeholder` files are intentionally not loadable by NCNN. If the real `.param` or `.bin` asset is missing, `LiteVisionEngine.loadModel()` throws `LiteVisionError.ModelAssetMissing` before entering native code.
+Optional TrackNet NCNN assets can also be downloaded by providing:
+
+```text
+-PliteVision.tracknetParamUrl=<public .param URL>
+-PliteVision.tracknetBinUrl=<public .bin URL>
+```
+
+If a required `.param` or `.bin` asset is missing, `LiteVisionEngine.loadModel()` throws `LiteVisionError.ModelAssetMissing` before entering native code.
 
 Do not commit large model binaries.
-

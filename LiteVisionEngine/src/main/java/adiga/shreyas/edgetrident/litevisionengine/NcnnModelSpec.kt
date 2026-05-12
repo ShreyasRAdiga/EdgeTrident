@@ -33,6 +33,8 @@ data class NcnnModelSpec(
 
     companion object {
         const val DEFAULT_OBJECT_TRACKER_ID = "litevision_object_tracker"
+        const val DEFAULT_YOLOV7_ID = "litevision_yolov7"
+        const val DEFAULT_TRACKNET_ID = "litevision_tracknet"
 
         fun objectTracker(
             id: String = DEFAULT_OBJECT_TRACKER_ID,
@@ -51,6 +53,41 @@ data class NcnnModelSpec(
             inputHeight = inputHeight,
             preferVulkan = preferVulkan,
         )
+
+        fun yoloV7(
+            id: String = DEFAULT_YOLOV7_ID,
+            inputName: String = "in0",
+            outputNames: List<String> = listOf("out0", "out1", "out2"),
+            inputWidth: Int = 640,
+            inputHeight: Int = 640,
+            preferVulkan: Boolean? = null,
+        ): NcnnModelSpec = NcnnModelSpec(
+            id = id,
+            paramAssetPath = "models/litevision/yolov7.param",
+            binAssetPath = "models/litevision/yolov7.bin",
+            inputName = inputName,
+            outputNames = outputNames,
+            inputWidth = inputWidth,
+            inputHeight = inputHeight,
+            preferVulkan = preferVulkan,
+        )
+
+        fun trackNet(
+            id: String = DEFAULT_TRACKNET_ID,
+            inputName: String = "images",
+            outputNames: List<String> = listOf("output0"),
+            inputWidth: Int = 640,
+            inputHeight: Int = 360,
+            preferVulkan: Boolean? = null,
+        ): NcnnModelSpec = NcnnModelSpec(
+            id = id,
+            paramAssetPath = "models/litevision/tracknet.param",
+            binAssetPath = "models/litevision/tracknet.bin",
+            inputName = inputName,
+            outputNames = outputNames,
+            inputWidth = inputWidth,
+            inputHeight = inputHeight,
+            preferVulkan = preferVulkan,
+        )
     }
 }
-

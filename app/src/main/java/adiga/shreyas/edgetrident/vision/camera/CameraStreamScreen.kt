@@ -146,7 +146,7 @@ private fun CameraPreviewWithAnalysis(
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
                 .also { it.setAnalyzer(cameraExecutor, analyzer) }
 
@@ -246,7 +246,8 @@ private fun MetricsOverlay(
                 },
             )
             MetricRow("Total", "${format(metrics.totalMs)} ms")
-            MetricRow("Tracks", metrics.trackCount.toString())
+            LaneMetricRow(metrics.yoloLane)
+            LaneMetricRow(metrics.poseLane)
             MetricRow("Frames", metrics.frameCount.toString())
             MetricRow("Path", metrics.copyPath)
             MetricRow("Native", metrics.nativeCapabilities)
@@ -276,6 +277,20 @@ private fun MetricRow(label: String, value: String) {
             modifier = Modifier.weight(1f),
         )
     }
+}
+
+@Composable
+private fun LaneMetricRow(lane: InferenceLaneMetrics) {
+    val state = when {
+        !lane.ready -> "not ready"
+        lane.ran -> "ran"
+        else -> "ready"
+    }
+    val suffix = lane.error?.let { " err=$it" }.orEmpty()
+    MetricRow(
+        lane.lane,
+        "${format(lane.durationMs)} ms, count=${lane.resultCount}, $state, ${lane.status}$suffix",
+    )
 }
 
 private fun format(value: Double): String =

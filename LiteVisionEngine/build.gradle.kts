@@ -15,6 +15,19 @@ val liteVisionNcnnSha256 = providers.gradleProperty("liteVision.ncnnSha256")
 val liteVisionNcnnAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
 val liteVisionNcnnRoot = layout.projectDirectory.dir("src/main/cpp/ncnn")
 val liteVisionNcnnArchive = layout.buildDirectory.file("downloads/ncnn/$liteVisionNcnnArchiveName")
+val liteVisionModelRoot = layout.projectDirectory.dir("src/main/assets/models/litevision")
+val liteVisionYoloV7ParamUrl = providers.gradleProperty("liteVision.yolov7ParamUrl")
+    .getOrElse("https://raw.githubusercontent.com/xiang-wuu/ncnn-android-yolov7/master/app/src/main/assets/yolov7-tiny.param")
+val liteVisionYoloV7ParamFallbackUrl = providers.gradleProperty("liteVision.yolov7ParamFallbackUrl")
+    .getOrElse("https://raw.githubusercontent.com/xiang-wuu/ncnn-android-yolov7/main/app/src/main/assets/yolov7-tiny.param")
+val liteVisionYoloV7BinUrl = providers.gradleProperty("liteVision.yolov7BinUrl")
+    .getOrElse("https://raw.githubusercontent.com/xiang-wuu/ncnn-android-yolov7/master/app/src/main/assets/yolov7-tiny.bin")
+val liteVisionYoloV7BinFallbackUrl = providers.gradleProperty("liteVision.yolov7BinFallbackUrl")
+    .getOrElse("https://raw.githubusercontent.com/xiang-wuu/ncnn-android-yolov7/main/app/src/main/assets/yolov7-tiny.bin")
+val liteVisionPoseTaskUrl = providers.gradleProperty("liteVision.poseTaskUrl")
+    .getOrElse("https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task")
+val liteVisionTrackNetParamUrl = providers.gradleProperty("liteVision.tracknetParamUrl").getOrElse("")
+val liteVisionTrackNetBinUrl = providers.gradleProperty("liteVision.tracknetBinUrl").getOrElse("")
 
 fun File.sha256Hex(): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -175,6 +188,94 @@ if (autoPrepareLiteVisionNcnn) {
             inputs.dir(liteVisionNcnnRoot)
         }
     }
+}
+
+fun downloadModelAsset(urlCandidates: List<String>, destination: File, label: String) {
+    if (destination.isFile && destination.length() > 0L) {
+        return
+    }
+
+    destination.parentFile.mkdirs()
+    var lastFailure: Throwable? = null
+
+    for (url in urlCandidates.distinct()) {
+        val temporaryFile = destination.resolveSibling("${destination.name}.part")
+        temporaryFile.delete()
+        try {
+            logger.lifecycle("Downloading $label from $url")
+            URI(url).toURL().openStream().use { input ->
+                temporaryFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (destination.exists()) {
+                destination.delete()
+            }
+            if (!temporaryFile.renameTo(destination)) {
+                temporaryFile.copyTo(destination, overwrite = true)
+                temporaryFile.delete()
+            }
+            return
+        } catch (error: Throwable) {
+            temporaryFile.delete()
+            lastFailure = error
+        }
+    }
+
+    throw GradleException("Failed to download $label from any configured URL.", lastFailure)
+}
+
+tasks.register("prepareLiteVisionModels") {
+    group = "litevision"
+    description = "Downloads runtime model assets used by LiteVisionEngine probes."
+    outputs.dir(liteVisionModelRoot)
+    inputs.property("liteVisionYoloV7ParamUrl", liteVisionYoloV7ParamUrl)
+    inputs.property("liteVisionYoloV7ParamFallbackUrl", liteVisionYoloV7ParamFallbackUrl)
+    inputs.property("liteVisionYoloV7BinUrl", liteVisionYoloV7BinUrl)
+    inputs.property("liteVisionYoloV7BinFallbackUrl", liteVisionYoloV7BinFallbackUrl)
+    inputs.property("liteVisionPoseTaskUrl", liteVisionPoseTaskUrl)
+    inputs.property("liteVisionTrackNetParamUrl", liteVisionTrackNetParamUrl)
+    inputs.property("liteVisionTrackNetBinUrl", liteVisionTrackNetBinUrl)
+
+    doLast {
+        val modelRoot = liteVisionModelRoot.asFile
+        downloadModelAsset(
+            urlCandidates = listOf(liteVisionYoloV7ParamUrl, liteVisionYoloV7ParamFallbackUrl),
+            destination = modelRoot.resolve("yolov7.param"),
+            label = "YOLOv7 param",
+        )
+        downloadModelAsset(
+            urlCandidates = listOf(liteVisionYoloV7BinUrl, liteVisionYoloV7BinFallbackUrl),
+            destination = modelRoot.resolve("yolov7.bin"),
+            label = "YOLOv7 bin",
+        )
+        downloadModelAsset(
+            urlCandidates = listOf(liteVisionPoseTaskUrl),
+            destination = modelRoot.resolve("pose_landmarker_lite.task"),
+            label = "MediaPipe Pose task",
+        )
+
+        if (liteVisionTrackNetParamUrl.isNotBlank() && liteVisionTrackNetBinUrl.isNotBlank()) {
+            downloadModelAsset(
+                urlCandidates = listOf(liteVisionTrackNetParamUrl),
+                destination = modelRoot.resolve("tracknet.param"),
+                label = "TrackNet param",
+            )
+            downloadModelAsset(
+                urlCandidates = listOf(liteVisionTrackNetBinUrl),
+                destination = modelRoot.resolve("tracknet.bin"),
+                label = "TrackNet bin",
+            )
+        } else {
+            logger.lifecycle(
+                "TrackNet download skipped. Set -PliteVision.tracknetParamUrl and -PliteVision.tracknetBinUrl to enable.",
+            )
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn("prepareLiteVisionModels")
 }
 
 android {
