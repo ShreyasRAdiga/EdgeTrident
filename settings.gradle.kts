@@ -24,4 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "EdgeTrident"
 include(":app")
- 
+include(":LiteVisionEngine")

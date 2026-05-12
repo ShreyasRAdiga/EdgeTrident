@@ -1,0 +1,6 @@
+*.bin
+*.param
+!*.placeholder
+!README.md
+!.gitignore
+
